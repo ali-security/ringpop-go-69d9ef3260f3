@@ -1,0 +1,66 @@
+name: seal-build
+on:
+  workflow_dispatch:
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MODULE_PATH: github.com/temporalio/ringpop-go
+      MODULE_VERSION: v0.0.0-20250130211428-b97329e994f7
+      GOPROXY: https://proxy.golang.org,direct
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - name: Restore upstream CI files for the module zip
+        working-directory: src
+        run: |
+          # .travis.yml and test/run-integration-tests are edited for our Travis legs; the published module zip carries the upstream copies
+          git checkout b97329e994f7 -- .travis.yml test/run-integration-tests
+          # upstream b97329e994f7 has no .github/ at all; the ali-security fork adds .github/CODEOWNERS and this workflow, so drop the whole dir to match the public module zip
+          rm -rf .github
+          # list any file the zip would carry that the upstream commit does not have
+          extra=$(comm -13 <(git ls-tree -r --name-only b97329e994f7 | sort) <(git ls-files --cached --others --exclude-standard | while read -r p; do [ -e "$p" ] && echo "$p"; done | sort))
+          if [ -n "$extra" ]; then echo "Files not in upstream b97329e994f7:"; echo "$extra"; fi
+          git status --short
+      - name: Build module zip
+        run: |
+          mkdir -p "$RUNNER_TEMP/helper" "$GITHUB_WORKSPACE/dist"
+          cd "$RUNNER_TEMP/helper"
+          go mod init sealhelper
+          go get golang.org/x/mod@v0.24.0
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+              "os"
+
+              "golang.org/x/mod/module"
+              "golang.org/x/mod/zip"
+          )
+
+          func main() {
+              f, err := os.Create(os.Args[3])
+              if err != nil {
+                  panic(err)
+              }
+              defer f.Close()
+              if err := zip.CreateFromDir(f, module.Version{Path: os.Args[1], Version: os.Args[2]}, os.Args[4]); err != nil {
+                  panic(err)
+              }
+          }
+          EOF
+          go run . "$MODULE_PATH" "$MODULE_VERSION" "$GITHUB_WORKSPACE/dist/$MODULE_VERSION.zip" "$GITHUB_WORKSPACE/src"
+          unzip -l "$GITHUB_WORKSPACE/dist/$MODULE_VERSION.zip" | tail -3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: dist/v0.0.0-20250130211428-b97329e994f7.zip
+          if-no-files-found: error
